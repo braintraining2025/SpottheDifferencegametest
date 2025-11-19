@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🍢 おでん間違い探し 🍢</title>
+<style>
+    body { font-family: "Helvetica Neue", Arial, sans-serif; text-align: center; background-color: #f9f7f2; padding: 20px; }
+    h1 { color: #5d4037; margin-bottom: 5px; }
+    p { color: #666; margin-top: 0; }
+
+    /* --- タイマー関連 --- */
+    #timer-area { width: 80%; max-width: 600px; margin: 10px auto 20px; }
+    #timer-bar-bg { width: 100%; height: 20px; background-color: #e0e0e0; border-radius: 10px; overflow: hidden; box-shadow: inset 0 1px 3px rgba(0,0,0,0.2); }
+    #timer-bar { width: 100%; height: 100%; background-color: #4caf50; transition: width 1s linear, background-color 1s; }
+    #timer-text { font-weight: bold; color: #d84315; margin-bottom: 5px; display: block; }
+
+    /* ゲームエリアとオーバーレイの共通設定 */
+    .game-container { display: flex; justify-content: center; gap: 10px; flex-wrap: wrap; max-width: 1200px; margin: 0 auto; position: relative; }
+    .image-wrapper { position: relative; border: 4px solid #fff; box-shadow: 0 4px 10px rgba(0,0,0,0.15); border-radius: 8px; overflow: hidden; cursor: crosshair; width: 48%; min-width: 300px; }
+    img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+
+    /* --- スタート/クリア/オーバーレイ --- */
+    #start-overlay {
+        position: absolute;
+        top: 0; left: 0; width: 100%; height: 100%;
+        background-color: rgba(255, 255, 255, 0.95);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        color: #5d4037;
+        font-size: 1.5rem;
+        font-weight: bold;
+        z-index: 200;
+    }
+    
+    #overlay-message { font-size: 2rem; margin-bottom: 20px; }
+
+    .start-button {
+        padding: 15px 30px;
+        background-color: #e60033;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-size: 1.2rem;
+        cursor: pointer;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        transition: background-color 0.2s;
+    }
+    .start-button:hover { background-color: #d32f2f; }
+
+    /* その他マークは省略 */
+    .circle { position: absolute; border: 4px solid #e60033; border-radius: 50%; width: 10%; height: 0; padding-bottom: 10%; transform: translate(-50%, -50%); box-shadow: 0 0 5px rgba(0,0,0,0.3); pointer-events: none; animation: pop 0.3s ease-out; }
+    .cross { position: absolute; width: 8%; height: 8%; pointer-events: none; transform: translate(-50%, -50%); animation: fadeOut 1s forwards; }
+    .cross::before, .cross::after { content: ''; position: absolute; width: 100%; height: 4px; background-color: #0095d9; top: 50%; left: 0; border-radius: 2px; box-shadow: 0 0 3px rgba(255,255,255,0.8); }
+    .cross::before { transform: rotate(45deg); }
+    .cross::after { transform: rotate(-45deg); }
+
+    @keyframes pop { 0% { transform: translate(-50%, -50%) scale(0); } 80% { transform: translate(-50%, -50%) scale(1.2); } 100% { transform: translate(-50%, -50%) scale(1); } }
+    @keyframes fadeOut { 0% { opacity: 1; } 100% { opacity: 0; } }
+
+    #status { font-size: 1.5rem; font-weight: bold; color: #d84315; margin: 10px 0; min-height: 1.5em;}
+    #dev-tool { display: none; background: #333; color: #0f0; padding: 10px; text-align: left; }
+</style>
+</head>
+<body>
+
+    <h1>🍢 おでん間違い探し 🍢</h1>
+    <div id="timer-area">
+        <span id="timer-text">残り時間: 60秒</span>
+        <div id="timer-bar-bg"><div id="timer-bar"></div></div>
+    </div>
+
+    <div id="status">残り 3 個</div>
+
+    <div class="game-container">
+        <div id="start-overlay">
+            <div id="overlay-message">間違い探しスタート！</div>
+            <button class="start-button" onclick="startGame()">スタート！</button>
+        </div>
+
+        <div class="image-wrapper"><img src="oden_left.jpg" alt="正しい画像"></div>
+        <div class="image-wrapper" id="game-area"><img src="oden_right.jpg" alt="間違い画像"></div>
+    </div>
+
+    <div id="dev-tool"><div id="coord-output"></div></div>
+    <button onclick="toggleDevMode()" style="margin-top:30px; padding:5px; border:none; background:none; color:#ccc;">(開発者用)</button>
+
+    <script>
+        // --- 設定 ---
+        const soundOkSrc = 'ok.mp3';
+        const soundNgSrc = 'ng.mp3';
+        const soundClearSrc = 'clear.mp3';
+        const bgmSrc = 'bgm.mp3'; // BGMのファイル名
+
+        // テンポ/ピッチ変更の閾値と設定値
+        const tempoChangeTime = 10; // 残り10秒でテンポアップ
+        const normalRate = 1.0;
+        const fastRate = 1.2;
+        
+        const timeLimit = 60; 
+        const initialDifferences = [
+            { id: 1, x: 50.0, y: 82.0, r: 12, found: false },
+            { id: 2, x: 90.0, y: 50.0, r: 12, found: false },
+            { id: 3, x: 54.0, y: 34.0, r: 10, found: false }
+        ];
+
+        // Web Audio API関連の変数
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const audioCtx = new AudioContext();
+        let bgmBuffer = null;
+        let bgmSource = null;
+
+        // 変数
+        let differences = JSON.parse(JSON.stringify(initialDifferences));
+        let timeLeft = timeLimit;
+        let timerId = null;
+        let isGameActive = false;
+        let foundCount = 0;
+        let isDevMode = false;
+        const totalCount = initialDifferences.length;
+
+        // 要素の取得
+        const gameArea = document.getElementById('game-area');
+        const statusDiv = document.getElementById('status');
+        const timerBar = document.getElementById('timer-bar');
+        const timerText = document.getElementById('timer-text');
+        const startOverlay = document.getElementById('start-overlay');
+        const overlayMessage = document.getElementById('overlay-message');
+        const startButton = document.querySelector('.start-button');
+        const devTool = document.getElementById('dev-tool');
+        const coordOutput = document.getElementById('coord-output');
+
+
+        // --- BGMの準備（ファイル読み込みとデコード） ---
+        // ページロード時にBGMファイルを一度だけ読み込む
+        fetch(bgmSrc)
+            .then(response => response.arrayBuffer())
+            .then(arrayBuffer => audioCtx.decodeAudioData(arrayBuffer))
+            .then(audioBuffer => {
+                bgmBuffer = audioBuffer;
+            })
+            .catch(e => console.error("BGMファイルの読み込みまたはデコードに失敗しました:", e));
+
+
+        // --- ゲーム開始/リセット ---
+        function startGame() {
+            // 1. BGMの再生開始/リセット
+            stopBGM();
+            if (bgmBuffer) {
+                playBGM(normalRate); // 通常速度で再生開始
+            }
+
+            // 2. 変数リセット
+            differences = JSON.parse(JSON.stringify(initialDifferences));
+            timeLeft = timeLimit;
+            foundCount = 0;
+            isGameActive = true;
+            
+            // 3. 画面リセット
+            startOverlay.style.display = 'none';
+            statusDiv.innerText = `残り ${totalCount} 個`;
+            document.querySelectorAll('.circle').forEach(el => el.remove()); 
+
+            // 4. タイマー開始
+            if (timerId) clearInterval(timerId);
+            startTimer();
+            updateTimerDisplay();
+        }
+
+        // --- BGM再生コントロール ---
+
+        // BGMの再生
+        function playBGM(rate) {
+            bgmSource = audioCtx.createBufferSource();
+            bgmSource.buffer = bgmBuffer;
+            bgmSource.loop = true; // ループ再生設定
+            bgmSource.playbackRate.value = rate; // 再生速度（ピッチ）
+            bgmSource.connect(audioCtx.destination);
+            bgmSource.start(0);
+        }
+
+        // BGMの停止
+        function stopBGM() {
+            if (bgmSource) {
+                bgmSource.stop();
+                bgmSource.disconnect();
+                bgmSource = null;
+            }
+        }
+        
+        // --- タイマー機能 ---
+        function startTimer() {
+            timerId = setInterval(() => {
+                timeLeft--;
+                updateTimerDisplay();
+                if (timeLeft <= 0) gameOver();
+            }, 1000);
+        }
+
+        function updateTimerDisplay() {
+            const percentage = (timeLeft / timeLimit) * 100;
+            timerBar.style.width = percentage + "%";
+            timerBar.style.backgroundColor = (percentage < 20) ? "#d32f2f" : ((percentage < 50) ? "#fbc02d" : "#4caf50");
+            timerText.innerText = `残り時間: ${timeLeft}秒`;
+            
+            // BGMのテンポ/ピッチ変更ロジック
+            if (bgmSource) {
+                if (timeLeft <= tempoChangeTime && bgmSource.playbackRate.value !== fastRate) {
+                    // 残り10秒以下でテンポアップ
+                    bgmSource.playbackRate.setValueAtTime(fastRate, audioCtx.currentTime);
+                } else if (timeLeft > tempoChangeTime && bgmSource.playbackRate.value !== normalRate) {
+                    // テンポを元に戻す（リプレイ時を考慮）
+                    bgmSource.playbackRate.setValueAtTime(normalRate, audioCtx.currentTime);
+                }
+            }
+        }
+
+        // --- クリックイベント ---
+        gameArea.addEventListener('click', function(e) {
+            if (!isGameActive) return;
+            // ... (座標計算のコードは省略) ...
+            const rect = gameArea.getBoundingClientRect();
+            const xPercent = ((e.clientX - rect.left) / rect.width) * 100;
+            const yPercent = ((e.clientY - rect.top) / rect.height) * 100;
+            // ...
+            
+            if (isDevMode) {
+                // 開発モードの処理（省略）
+            }
+
+            let hit = false;
+            differences.forEach(diff => {
+                const dx = Math.abs(xPercent - diff.x);
+                const dy = Math.abs(yPercent - diff.y);
+                if (Math.sqrt(dx*dx + dy*dy) < diff.r && !diff.found) {
+                    hit = true;
+                    diff.found = true;
+                    playSound(soundOkSrc);
+                    showCircle(diff.x, diff.y);
+                    foundCount++;
+                    updateStatus();
+                }
+            });
+
+            if (!hit) {
+                playSound(soundNgSrc);
+                showCross(xPercent, yPercent);
+            }
+        });
+
+
+        // --- ゲーム終了処理 ---
+        function gameOver() {
+            clearInterval(timerId);
+            isGameActive = false;
+            stopBGM(); // BGMを停止
+            
+            startOverlay.style.display = 'flex';
+            overlayMessage.innerText = "残念！時間切れです...";
+            startButton.innerText = "もう一度遊ぶ";
+            statusDiv.innerText = "残念... 時間切れです";
+        }
+
+        function gameClear() {
+            clearInterval(timerId);
+            isGameActive = false;
+            stopBGM(); // BGMを停止
+            
+            setTimeout(() => {
+                playSound(soundClearSrc);
+            }, 300); 
+
+            startOverlay.style.display = 'flex';
+            overlayMessage.innerHTML = "🏆 完全クリアおめでとう！ 🏆";
+            startButton.innerText = "もう一度遊ぶ";
+            statusDiv.innerHTML = `🎉 クリア！残り時間 ${timeLeft}秒 🎉`;
+            statusDiv.style.color = "#2e7d32";
+        }
+
+        // --- ユーティリティ ---
+        function playSound(src) {
+            // SEは新しいAudioオブジェクトで再生
+            const audio = new Audio(src);
+            audio.currentTime = 0;
+            audio.play().catch(e => console.error("SE再生エラー:", e));
+        }
+
+        function showCircle(x, y, isTemp = false) {
+            const circle = document.createElement('div');
+            circle.classList.add('circle');
+            circle.style.left = x + '%';
+            circle.style.top = y + '%';
+            if(isTemp) { circle.style.borderColor = 'blue'; setTimeout(() => circle.remove(), 1000); }
+            gameArea.appendChild(circle);
+        }
+
+        function showCross(x, y) {
+            const cross = document.createElement('div');
+            cross.classList.add('cross');
+            cross.style.left = x + '%';
+            cross.style.top = y + '%';
+            gameArea.appendChild(cross);
+            setTimeout(() => cross.remove(), 1000);
+        }
+
+        function updateStatus() {
+            const remain = totalCount - foundCount;
+            if (remain === 0) gameClear();
+            else statusDiv.innerText = `残り ${remain} 個`;
+        }
+        
+        function toggleDevMode() {
+            isDevMode = !isDevMode;
+            devTool.style.display = isDevMode ? 'block' : 'none';
+        }
+
+        // ページロード時、音声を一度鳴らす許可を得るためにダミーの再生を試みる
+        // Mac/ブラウザの制限対策
+        startOverlay.addEventListener('click', () => {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }, { once: true });
+    </script>
+</body>
+</html>
